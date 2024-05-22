@@ -24,18 +24,81 @@ import yaml
 import torch
 import cv2
 import numpy as np
+import matplotlib.pyplot as plt
+
+
+import OpenEXR
+import Imath
+
+def save_depth_to_exr(depth_array, filename):
+
+    # print(depth_tensor.shape)               ### [1,1,224,224]
+    # depth_array = depth_tensor.numpy()  # Convert to numpy array
+
+
+    if depth_array.ndim == 3:
+        # Assuming the depth information is in the first channel
+        depth_array = depth_array[:, :, 0]
+    
+    # Print the shape after extracting the depth channel
+    print(f"Extracted depth array shape: {depth_array.shape}")
+
+    depth_array_resized = cv2.resize(depth_array, (640, 480), interpolation=cv2.INTER_LINEAR)
+    print(f"Resized depth array shape: {depth_array_resized.shape}")
+
+    if depth_array_resized.dtype != np.float32:
+        depth_array_resized = depth_array_resized.astype(np.float32)
+
+    if depth_array_resized.ndim != 2:
+        raise ValueError("Depth array must be 2D.")
+    print(f"수정된 depth size: {depth_array_resized.shape}")
+
+    print("수정된 depth values:")
+    # print(depth_array)  
+
+    print("Statistics of depth values:")
+    print("Min depth:", np.min(depth_array_resized))
+    print("Max depth:", np.max(depth_array_resized))
+    print("Mean depth:", np.mean(depth_array_resized))
+    print("Standard deviation of depth:", np.std(depth_array_resized))
+
+
+    # Save to EXR format
+    header = OpenEXR.Header(depth_array_resized.shape[1], depth_array_resized.shape[0])
+    half_chan = Imath.Channel(Imath.PixelType(Imath.PixelType.FLOAT))
+    header['channels'] = {'Y': half_chan}
+
+    os.makedirs(os.path.dirname(filename), exist_ok=True)  # Ensure directory exists
+    exr_file = OpenEXR.OutputFile(filename, header)
+    exr_file.writePixels({'Y': depth_array_resized.tobytes()})
+    exr_file.close()
+
+    # print("결과 check")
+    # result_depth_path = "/home/dyros-recruit/GraspNeRF/src/nr/ckpt/restored_depth.exr"     ## 손상된 depth
+    # sim_depth =  cv2.imread(result_depth_path, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH) 
+    # print(f"결과 확인용 depth size: {sim_depth.shape}")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Run eval of depth completion on synthetic data')
     parser.add_argument('-c', '--configFile', required=True, help='Path to config yaml file', metavar='path/to/config')
     parser.add_argument('-m', '--maskInputDepth', action="store_true", help='Whether we should mask out objects in input depth')
+    parser.add_argument('-rgbd','--rgb_depthFile', required=True, help='Path to rgb_data_file' )
     args = parser.parse_args()
 
+    print(f"Config file path: {args.configFile}")
+    print(f"Mask input depth: {args.maskInputDepth}")
+    print(f"RGB depth file path: {args.rgb_depthFile}")
+
     # Load Config File
-    CONFIG_FILE_PATH = args.configFile
+    CONFIG_FILE_PATH = args.configFile      ## config.yaml 불어오는 파일
     with open(CONFIG_FILE_PATH) as fd:
         config_yaml = yaml.safe_load(fd)
     config = attrdict.AttrDict(config_yaml)
+
+    # Load rgb-depth file from graspnerf model
+    RGB_DEPTH_FILE_PATH = args.rgb_depthFile
+
+    print(f"RGB depth file path: {RGB_DEPTH_FILE_PATH}")
 
     # Create directory to save results
     RESULTS_ROOT_DIR = config.resultsDir
@@ -74,6 +137,7 @@ if __name__ == '__main__':
     #     cx = int(config.depth2depth.cx)
     #     cy = int(config.depth2depth.cy)
 
+    ## depth를 복원하는 api를 불러와서 사용 
     depthcomplete = depth_completion_api.DepthToDepthCompletion(normalsWeightsFile=config.normals.pathWeightsFile,
                                                                 outlinesWeightsFile=config.outlines.pathWeightsFile,
                                                                 masksWeightsFile=config.masks.pathWeightsFile,
@@ -98,7 +162,9 @@ if __name__ == '__main__':
                                                                 outlinesInferenceWidth=config.normals.inferenceWidth,
                                                                 min_depth=config.depthVisualization.minDepth,
                                                                 max_depth=config.depthVisualization.maxDepth,
-                                                                tmp_dir=results_dir)
+                                                                tmp_dir=results_dir,
+                                                                rgbd_data_dir = RGB_DEPTH_FILE_PATH
+                                                                )
 
     # Create lists of input data
     rgb_file_list = []
@@ -117,12 +183,14 @@ if __name__ == '__main__':
         assert len(rgb_file_list) == len(depth_file_list), (
             'number of rgb ({}) and depth images ({}) are not equal'.format(len(rgb_file_list), len(depth_file_list)))
 
+        ########  투명 물체 파지 시뮬레이션 사용에서는 mask 데이터가 없음 
         if dataset.masks is not None and dataset.masks != '':
             for ext in EXT_MASK:
                 segmentation_masks_list += (sorted(glob.glob(os.path.join(dataset.masks, '*' + ext))))
             assert len(rgb_file_list) == len(segmentation_masks_list), (
                 'number of rgb ({}) and masks ({}) are not equal'.format(len(rgb_file_list),
                                                                          len(segmentation_masks_list)))
+        ######### 투명 물체 파지 시뮬레이션에서 받는 정보에 gt_depth 없음 
         if dataset.gt_depth is not None and dataset.gt_depth != '':
             for ext in EXT_DEPTH_GT:
                 gt_depth_file_list += (sorted(glob.glob(os.path.join(dataset.gt_depth, '*' + ext))))
@@ -134,7 +202,7 @@ if __name__ == '__main__':
     print('Total Num of depth_files:', len(depth_file_list))
     print('Total Num of gt_depth_files:', len(gt_depth_file_list))
     print('Total Num of segmentation_masks:', len(segmentation_masks_list))
-    assert len(rgb_file_list) > 0, ('No files found in given directories')
+    # assert len(rgb_file_list) > 0, ('No files found in given directories')
 
     # Create CSV File to store error metrics
     csv_filename = 'computed_errors.csv'
@@ -152,107 +220,143 @@ if __name__ == '__main__':
     mae_mean = 0.0
     sq_rel_mean = 0.0
 
-    for i in range(len(rgb_file_list)):
+    ################################################### graspnerf 적용 code #############################################
+    color_img_path = os.path.join(RGB_DEPTH_FILE_PATH,"rgb","0022.png")
+    print(color_img_path)
+    # input_depth_path = os.path.join(RGB_DEPTH_FILE_PATH,"depth","0022_0.exr")   # depth
+    input_depth_path = os.path.join(RGB_DEPTH_FILE_PATH,"stereo_depth","0022_simDepthImage.exr")   # stereo matching 후 depth
 
-        # Run Depth Completion
-        color_img = imageio.imread(rgb_file_list[i])
-        input_depth = api_utils.exr_loader(depth_file_list[i], ndim=1)
+    color_img = imageio.imread(color_img_path)
+    input_depth = api_utils.exr_loader(input_depth_path, ndim =1)
+    # print(input_depth.size)
+    output_depth, filtered_output_depth = depthcomplete.depth_completion(
+        color_img,
+        input_depth,
+        inertia_weight=float(config.depth2depth.inertia_weight),
+        smoothness_weight=float(config.depth2depth.smoothness_weight),
+        tangent_weight=float(config.depth2depth.tangent_weight),
+        mode_modify_input_depth=config.modifyInputDepth.mode,
+        dilate_mask=True)
+    # image = cv2.imread(depth_image_path, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
+    ###################### stereo mathcing 하기 전 input으로 받은 depth image #####################
+    output_depth_save = np.stack((output_depth,)*3, axis=-1)
+    # plt.imshow(output_depth, cmap='gray')  # 회색조로 깊이 이미지 표시
+    # plt.colorbar()  # 색상 막대 표시
+    # plt.title(f'cleargrasp restored Depth Image')
+    # plt.show()
+    save_depth_to_exr(output_depth_save,"/home/dyros-recruit/GraspNeRF/src/nr/ckpt/restored_depth_cleargrasp.exr")
+    ######################################################################################################################
 
-        # NOTE: If no gt_depth present, it means the depth itself is gt_depth (syn data). We mask out all objects in input depth so depthcomplete can't cheat.
-        if len(gt_depth_file_list) == 0 and len(segmentation_masks_list) > 0:
-            if args.maskInputDepth:
-                masks = imageio.imread(segmentation_masks_list[i])
-                input_depth[masks > 0] = 0.0
+    # for i in range(len(rgb_file_list)):
 
-        try:
-            output_depth, filtered_output_depth = depthcomplete.depth_completion(
-                color_img,
-                input_depth,
-                inertia_weight=float(config.depth2depth.inertia_weight),
-                smoothness_weight=float(config.depth2depth.smoothness_weight),
-                tangent_weight=float(config.depth2depth.tangent_weight),
-                mode_modify_input_depth=config.modifyInputDepth.mode,
-                dilate_mask=True)
-        except depth_completion_api.DepthCompletionError as e:
-            print('Depth Completion Failed:\n  {}\n  ...skipping image {}'.format(e, i))
-            continue
+    #     # Run Depth Completion
+    #     color_img = imageio.imread(rgb_file_list[i])
+    #     input_depth = api_utils.exr_loader(depth_file_list[i], ndim=1)
 
-        # Compute Errors in Depth Estimation over the Masked Area
-        # If a folder of masks is given, use it to calc error only over masked regions, else over entire image
-        if segmentation_masks_list:
-            seg_mask = imageio.imread(segmentation_masks_list[i])
-            seg_mask = cv2.resize(seg_mask, (outputImgWidth, outputImgHeight), interpolation=cv2.INTER_NEAREST)
-            seg_mask = (seg_mask > 0)
-        else:
-            seg_mask = np.full((outputImgHeight, outputImgWidth), True, dtype=float)
+    #     # NOTE: If no gt_depth present, it means the depth itself is gt_depth (syn data). We mask out all objects in input depth so depthcomplete can't cheat.
+    #     if len(gt_depth_file_list) == 0 and len(segmentation_masks_list) > 0:
+    #         if args.maskInputDepth:
+    #             masks = imageio.imread(segmentation_masks_list[i])
+    #             input_depth[masks > 0] = 0.0
 
-        # If Ground Truth depth folder is given, use that to compute errors. In case of Synthetic data, input depth is GT depth.
-        if gt_depth_file_list:
-            depth_gt = api_utils.exr_loader(gt_depth_file_list[i], ndim=1)
-        else:
-            depth_gt = api_utils.exr_loader(depth_file_list[i], ndim=1)
+    #     try:
+    #         output_depth, filtered_output_depth = depthcomplete.depth_completion(
+    #             color_img,
+    #             input_depth,
+    #             inertia_weight=float(config.depth2depth.inertia_weight),
+    #             smoothness_weight=float(config.depth2depth.smoothness_weight),
+    #             tangent_weight=float(config.depth2depth.tangent_weight),
+    #             mode_modify_input_depth=config.modifyInputDepth.mode,
+    #             dilate_mask=True)
+    #         # image = cv2.imread(depth_image_path, cv2.IMREAD_ANYCOLOR | cv2.IMREAD_ANYDEPTH)
+    #         ###################### stereo mathcing 하기 전 input으로 받은 depth image #####################
+    #         output_depth_save = np.stack((output_depth,)*3, axis=-1)
+    #         plt.imshow(output_depth, cmap='gray')  # 회색조로 깊이 이미지 표시
+    #         plt.colorbar()  # 색상 막대 표시
+    #         plt.title(f'cleargrasp restored Depth Image')
+    #         plt.show()
+    #         save_depth_to_exr(output_depth_save,"/home/dyros-recruit/GraspNeRF/src/nr/ckpt/restored_depth.exr")
+    #         #########################################33333333333333333333333333######333
+    #     except depth_completion_api.DepthCompletionError as e:
+    #         print('Depth Completion Failed:\n  {}\n  ...skipping image {}'.format(e, i))
+    #         continue
 
-        depth_gt = cv2.resize(depth_gt, (outputImgWidth, outputImgHeight), interpolation=cv2.INTER_NEAREST)
-        depth_gt[np.isnan(depth_gt)] = 0
-        depth_gt[np.isinf(depth_gt)] = 0
-        mask_valid_region = (depth_gt > 0)
-        mask_valid_region = np.logical_and(mask_valid_region, seg_mask)
-        mask_valid_region = (mask_valid_region.astype(np.uint8) * 255)
+    #     # Compute Errors in Depth Estimation over the Masked Area
+    #     # If a folder of masks is given, use it to calc error only over masked regions, else over entire image
+    #     if segmentation_masks_list:
+    #         seg_mask = imageio.imread(segmentation_masks_list[i])
+    #         seg_mask = cv2.resize(seg_mask, (outputImgWidth, outputImgHeight), interpolation=cv2.INTER_NEAREST)
+    #         seg_mask = (seg_mask > 0)
+    #     else:
+    #         seg_mask = np.full((outputImgHeight, outputImgWidth), True, dtype=float)
 
-        metrics = depthcomplete.compute_errors(depth_gt, output_depth, mask_valid_region)
+    #     # If Ground Truth depth folder is given, use that to compute errors. In case of Synthetic data, input depth is GT depth.
+    #     if gt_depth_file_list:
+    #         depth_gt = api_utils.exr_loader(gt_depth_file_list[i], ndim=1)
+    #     else:
+    #         depth_gt = api_utils.exr_loader(depth_file_list[i], ndim=1)
 
-        print('\nImage {:09d} / {}:'.format(i, len(rgb_file_list) - 1))
-        print('{:>15}:'.format('rmse'), metrics['rmse'])
-        print('{:>15}:'.format('abs_rel'), metrics['abs_rel'])
-        print('{:>15}:'.format('mae'), metrics['mae'])
-        print('{:>15}:'.format('a1.05'), metrics['a1'])
-        print('{:>15}:'.format('a1.10'), metrics['a2'])
-        print('{:>15}:'.format('a1.25'), metrics['a3'])
+    #     depth_gt = cv2.resize(depth_gt, (outputImgWidth, outputImgHeight), interpolation=cv2.INTER_NEAREST)
+    #     depth_gt[np.isnan(depth_gt)] = 0
+    #     depth_gt[np.isinf(depth_gt)] = 0
+    #     mask_valid_region = (depth_gt > 0)
+    #     mask_valid_region = np.logical_and(mask_valid_region, seg_mask)
+    #     mask_valid_region = (mask_valid_region.astype(np.uint8) * 255)
 
-        # Write the data into a csv file
-        with open(os.path.join(results_dir, csv_filename), 'a', newline='') as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=field_names, delimiter=',')
-            row_data = [
-                i, metrics["rmse"], metrics["abs_rel"], metrics["mae"], metrics["a1"], metrics["a2"], metrics["a3"]
-            ]
-            writer.writerow(dict(zip(field_names, row_data)))
+    #     metrics = depthcomplete.compute_errors(depth_gt, output_depth, mask_valid_region)
 
-        a1_mean += metrics['a1']
-        a2_mean += metrics['a2']
-        a3_mean += metrics['a3']
-        rmse_mean += metrics['rmse']
-        abs_rel_mean += metrics['abs_rel']
-        mae_mean += metrics['mae']
-        sq_rel_mean += metrics['sq_rel']
+    #     print('\nImage {:09d} / {}:'.format(i, len(rgb_file_list) - 1))
+    #     print('{:>15}:'.format('rmse'), metrics['rmse'])
+    #     print('{:>15}:'.format('abs_rel'), metrics['abs_rel'])
+    #     print('{:>15}:'.format('mae'), metrics['mae'])
+    #     print('{:>15}:'.format('a1.05'), metrics['a1'])
+    #     print('{:>15}:'.format('a1.10'), metrics['a2'])
+    #     print('{:>15}:'.format('a1.25'), metrics['a3'])
 
-        # Save Results of Depth Completion
-        error_output_depth, error_filtered_output_depth = depthcomplete.store_depth_completion_outputs(
-            root_dir=results_dir,
-            files_prefix=i,
-            min_depth=config.depthVisualization.minDepth,
-            max_depth=config.depthVisualization.maxDepth)
-        # print('    Mean Absolute Error in output depth (if Synthetic Data)   = {:.4f} cm'.format(error_output_depth))
-        # print('    Mean Absolute Error in filtered depth (if Synthetic Data) = {:.4f} cm'.format(error_filtered_output_depth))
+    #     # Write the data into a csv file
+    #     with open(os.path.join(results_dir, csv_filename), 'a', newline='') as csvfile:
+    #         writer = csv.DictWriter(csvfile, fieldnames=field_names, delimiter=',')
+    #         row_data = [
+    #             i, metrics["rmse"], metrics["abs_rel"], metrics["mae"], metrics["a1"], metrics["a2"], metrics["a3"]
+    #         ]
+    #         writer.writerow(dict(zip(field_names, row_data)))
 
-    # Calculate Mean Errors over entire Dataset
-    a1_mean = round(a1_mean / len(rgb_file_list), 2)
-    a2_mean = round(a2_mean / len(rgb_file_list), 2)
-    a3_mean = round(a3_mean / len(rgb_file_list), 2)
-    rmse_mean = round(rmse_mean / len(rgb_file_list), 3)
-    abs_rel_mean = round(abs_rel_mean / len(rgb_file_list), 3)
-    mae_mean = round(mae_mean / len(rgb_file_list), 3)
-    sq_rel_mean = round(sq_rel_mean / len(rgb_file_list), 3)
+    #     a1_mean += metrics['a1']
+    #     a2_mean += metrics['a2']
+    #     a3_mean += metrics['a3']
+    #     rmse_mean += metrics['rmse']
+    #     abs_rel_mean += metrics['abs_rel']
+    #     mae_mean += metrics['mae']
+    #     sq_rel_mean += metrics['sq_rel']
 
-    print('\n\nMean Error Stats for Entire Dataset:')
-    print('{:>15}:'.format('rmse_mean'), rmse_mean)
-    print('{:>15}:'.format('abs_rel_mean'), abs_rel_mean)
-    print('{:>15}:'.format('mae_mean'), mae_mean)
-    print('{:>15}:'.format('a1.05_mean'), a1_mean)
-    print('{:>15}:'.format('a1.10_mean'), a2_mean)
-    print('{:>15}:'.format('a1.25_mean'), a3_mean)
+    #     # Save Results of Depth Completion
+    #     error_output_depth, error_filtered_output_depth = depthcomplete.store_depth_completion_outputs(
+    #         root_dir=results_dir,
+    #         files_prefix=i,
+    #         min_depth=config.depthVisualization.minDepth,
+    #         max_depth=config.depthVisualization.maxDepth)
+    #     # print('    Mean Absolute Error in output depth (if Synthetic Data)   = {:.4f} cm'.format(error_output_depth))
+    #     # print('    Mean Absolute Error in filtered depth (if Synthetic Data) = {:.4f} cm'.format(error_filtered_output_depth))
 
-    # Write the data into a csv file
-    with open(os.path.join(results_dir, csv_filename), 'a', newline='') as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=field_names, delimiter=',')
-        row_data = ['MEAN', rmse_mean, abs_rel_mean, mae_mean, a1_mean, a2_mean, a3_mean]
-        writer.writerow(dict(zip(field_names, row_data)))
+    # # Calculate Mean Errors over entire Dataset
+    # a1_mean = round(a1_mean / len(rgb_file_list), 2)
+    # a2_mean = round(a2_mean / len(rgb_file_list), 2)
+    # a3_mean = round(a3_mean / len(rgb_file_list), 2)
+    # rmse_mean = round(rmse_mean / len(rgb_file_list), 3)
+    # abs_rel_mean = round(abs_rel_mean / len(rgb_file_list), 3)
+    # mae_mean = round(mae_mean / len(rgb_file_list), 3)
+    # sq_rel_mean = round(sq_rel_mean / len(rgb_file_list), 3)
+
+    # print('\n\nMean Error Stats for Entire Dataset:')
+    # print('{:>15}:'.format('rmse_mean'), rmse_mean)
+    # print('{:>15}:'.format('abs_rel_mean'), abs_rel_mean)
+    # print('{:>15}:'.format('mae_mean'), mae_mean)
+    # print('{:>15}:'.format('a1.05_mean'), a1_mean)
+    # print('{:>15}:'.format('a1.10_mean'), a2_mean)
+    # print('{:>15}:'.format('a1.25_mean'), a3_mean)
+
+    # # Write the data into a csv file
+    # with open(os.path.join(results_dir, csv_filename), 'a', newline='') as csvfile:
+    #     writer = csv.DictWriter(csvfile, fieldnames=field_names, delimiter=',')
+    #     row_data = ['MEAN', rmse_mean, abs_rel_mean, mae_mean, a1_mean, a2_mean, a3_mean]
+    #     writer.writerow(dict(zip(field_names, row_data)))

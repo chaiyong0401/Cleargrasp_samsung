@@ -27,7 +27,7 @@ from . import inference_models, utils
 
 class DepthCompletionError(Exception):
     """Exception raised when the depth2depth module fails to complete depth.
-
+    depth2depth 모듈이 실패할 때 발생하는 예외 정의 
     Args:
         msg(str): Explanation of the error
     """
@@ -41,6 +41,7 @@ class DepthCompletionError(Exception):
 
 class DepthToDepthCompletion(object):
     """This is an API for running depth completion using depth2depth module (external C++ executable).
+    깊이 보정을 수행하기 위한 API 제공
 
     The depth2depth module is an external C++ executable that accepts an input depth with holes and fills in the
     holes using a global optimization algorithm. It requires 3 files as inputs:
@@ -181,6 +182,7 @@ class DepthToDepthCompletion(object):
             min_depth=0.0,
             max_depth=3.0,
             tmp_dir=None,
+            rgbd_data_dir=None
     ):
 
         self.depth2depthExecutable = depth2depthExecutable
@@ -196,6 +198,7 @@ class DepthToDepthCompletion(object):
         self.masksWeightsFile = masksWeightsFile
         self.min_depth = min_depth
         self.max_depth = max_depth
+        self.rgbd_data_dir = rgbd_data_dir
 
         # Paths to the intermediate files generated for depth2depth
         if tmp_dir is not None:
@@ -772,6 +775,8 @@ class DepthToDepthCompletion(object):
             numpy.ndarray: Filtered Output Depth
         """
         # Resize images to output image size
+        scale = (256/640,256/480)
+        
         self.input_image = cv2.resize(rgb_image, (self.outputImgWidth, self.outputImgHeight),
                                       interpolation=cv2.INTER_LINEAR)
         # Clean input depth
